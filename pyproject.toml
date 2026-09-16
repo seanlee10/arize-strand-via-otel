@@ -1,0 +1,15 @@
+[project]
+name = "strands-arize-sample"
+version = "0.1.0"
+description = "Strands weather agent with OpenInference traces sent to Arize AX"
+requires-python = ">=3.11"
+dependencies = [
+    "openinference-instrumentation-strands-agents>=0.1.8,<0.2",
+    "strands-agents[anthropic]>=1.56.0,<2",
+    "python-dotenv>=1.2.3,<2",
+    "opentelemetry-sdk>=1.44.0,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.44.0,<2",
+]
+
+[tool.uv]
+package = false

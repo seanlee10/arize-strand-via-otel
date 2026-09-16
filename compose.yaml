@@ -1,0 +1,16 @@
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.160.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    environment:
+      ARIZE_API_KEY: ${ARIZE_API_KEY:?Set ARIZE_API_KEY in .env}
+      ARIZE_SPACE_ID: ${ARIZE_SPACE_ID:?Set ARIZE_SPACE_ID in .env}
+      ARIZE_COLLECTOR_ENDPOINT: ${ARIZE_COLLECTOR_ENDPOINT:-https://otlp.arize.com/v1/traces}
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:13133:13133"
+    mem_limit: 256m
+    stop_grace_period: 30s

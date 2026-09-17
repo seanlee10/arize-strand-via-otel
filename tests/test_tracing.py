@@ -54,6 +54,22 @@ class DemoModel(Model):
 
 
 class TracingTest(unittest.TestCase):
+    def test_invalid_route_does_not_export_or_inherit_another_space(self):
+        for target in ("", "invalid space", "bad;multiple"):
+            with self.subTest(target=target), patch.dict(os.environ, {
+                "ARIZE_SPACE_ID": "U3BhY2U6b3RoZXI=",
+            }), patch("instrumentation.trace.set_tracer_provider"), patch("instrumentation.StrandsTelemetry"), patch("instrumentation.OTLPSpanExporter") as exporter:
+                with self.assertLogs("instrumentation", level="WARNING"):
+                    provider = setup_tracing(space_id=target)
+                try:
+                    # No export, including when an explicit empty route overrides env.
+                    with provider.get_tracer(__name__).start_as_current_span("still-runs"):
+                        pass
+                    provider.force_flush()
+                    exporter.assert_not_called()
+                finally:
+                    provider.shutdown()
+
     def test_agent_tool_and_llm_are_transformed_before_http_export(self):
         requests = []
 
@@ -75,7 +91,7 @@ class TracingTest(unittest.TestCase):
         try:
             with patch.dict(os.environ, {
                 "ARIZE_API_KEY": "local-test-key",
-                "ARIZE_SPACE_ID": "local-test-space",
+                "ARIZE_SPACE_ID": "U3BhY2U6dGVzdA==",
                 "ARIZE_PROJECT_NAME": "local-test-project",
                 "ARIZE_COLLECTOR_ENDPOINT": "https://must-not-contact.invalid/v1/traces",
                 "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"http://127.0.0.1:{server.server_port}/v1/traces",
@@ -96,7 +112,7 @@ class TracingTest(unittest.TestCase):
                 self.assertEqual(path, "/v1/traces")
                 headers = {key.lower(): value for key, value in headers.items()}
                 self.assertNotIn("authorization", headers)
-                self.assertNotIn("arize-space-id", headers)
+                self.assertEqual(headers["arize-space-id"], "U3BhY2U6dGVzdA==")
                 for resource in request.resource_spans:
                     attrs = {a.key: a.value.string_value for a in resource.resource.attributes}
                     self.assertEqual(attrs["openinference.project.name"], "local-test-project")

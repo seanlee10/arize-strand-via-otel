@@ -40,6 +40,8 @@ def create_agent(model) -> Agent:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prompt", nargs="?", default="서울 날씨를 알려줘.")
+    parser.add_argument("--space-id", help="Destination Space ID (overrides ARIZE_SPACE_ID)")
+    parser.add_argument("--project-name", help="Arize project (overrides ARIZE_PROJECT_NAME)")
     args = parser.parse_args()
     try:
         load_config()
@@ -47,7 +49,7 @@ def main() -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    provider = setup_tracing()
+    provider = setup_tracing(space_id=args.space_id, project_name=args.project_name)
     try:
         model = AnthropicModel(
             model_id=os.getenv("ANTHROPIC_MODEL") or "claude-haiku-4-5-20251001",

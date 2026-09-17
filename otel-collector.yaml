@@ -3,17 +3,35 @@ receivers:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+        include_metadata: true
       http:
         endpoint: 0.0.0.0:4318
+        include_metadata: true
 
 processors:
   memory_limiter:
     check_interval: 1s
     limit_mib: 192
     spike_limit_mib: 48
+  attributes/routing:
+    actions:
+      # Clear any payload-provided value; the transport header is authoritative.
+      - key: arize.space_id
+        action: delete
+      - key: arize.space_id
+        from_context: metadata.arize-space-id
+        action: upsert
+  filter/require_space:
+    error_mode: propagate
+    trace_conditions:
+      - 'span.attributes["arize.space_id"] == nil'
+      - 'not IsMatch(span.attributes["arize.space_id"], "^[A-Za-z0-9+/]+={0,2}$")'
   batch:
     timeout: 1s
     send_batch_size: 512
+    # Never batch different destination spaces into the same export request.
+    metadata_keys: [arize-space-id]
+    metadata_cardinality_limit: 100
 
 exporters:
   otlp_http/arize:
@@ -23,8 +41,9 @@ exporters:
     compression: none
     headers:
       authorization: ${env:ARIZE_API_KEY}
-      arize-space-id: ${env:ARIZE_SPACE_ID}
       arize-interface: otel-collector
+    auth:
+      authenticator: headers_setter/arize
     timeout: 15s
     retry_on_failure:
       enabled: true
@@ -40,13 +59,19 @@ exporters:
     verbosity: basic
 
 extensions:
+  headers_setter/arize:
+    headers:
+      - action: upsert
+        key: arize-space-id
+        from_context: arize-space-id
+        # No default destination: missing headers must not fall back to a space.
   health_check:
     endpoint: 0.0.0.0:13133
 
 service:
-  extensions: [health_check]
+  extensions: [health_check, headers_setter/arize]
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, attributes/routing, filter/require_space, batch]
       exporters: [otlp_http/arize, debug]

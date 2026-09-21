@@ -19,12 +19,12 @@ processors:
       - key: arize.space_id
         action: delete
       - key: arize.space_id
-        from_context: metadata.arize-space-id
+        from_context: metadata.space_id
         action: upsert
       - key: arize.auth
         action: delete
       - key: arize.auth
-        from_context: metadata.authorization
+        from_context: metadata.arize_api_key
         action: upsert
   filter/require_route:
     error_mode: propagate
@@ -43,7 +43,7 @@ processors:
     timeout: 1s
     send_batch_size: 512
     # Never batch different destination spaces or credentials into one request.
-    metadata_keys: [arize-space-id, authorization]
+    metadata_keys: [space_id, arize_api_key]
     metadata_cardinality_limit: 100
 
 exporters:
@@ -73,12 +73,13 @@ exporters:
 extensions:
   headers_setter/arize:
     headers:
+      # Translate the client's names into the ones Arize HTTP expects.
       - action: upsert
         key: arize-space-id
-        from_context: arize-space-id
+        from_context: space_id
       - action: upsert
         key: authorization
-        from_context: authorization
+        from_context: arize_api_key
         # No defaults: the Collector holds no credential and no destination of
         # its own, so a request missing either header is dropped by the filter.
   health_check:

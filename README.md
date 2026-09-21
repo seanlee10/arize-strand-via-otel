@@ -34,7 +34,7 @@ flowchart LR
 | OTel Collector | Receives spans, limits memory usage, batches per destination, retries, and relays to Arize with the client's credential |
 | Arize AX | Displays traces, parent-child relationships, inputs, outputs, and errors |
 
-The client selects its destination with the `arize-space-id` OTLP request header and authenticates with the `authorization` header. The Collector forwards both upstream and stores neither, so it holds no credential of its own. The client supplies the project name through the `openinference.project.name` resource attribute. Each client's API key must have access to the Space it selects.
+The client selects its destination with the `space_id` OTLP request header and authenticates with the `arize_api_key` header. The Collector renames them to the pair Arize's HTTP endpoint expects (`arize-space-id` and `authorization`) and stores neither, so it holds no credential of its own. The client supplies the project name through the `openinference.project.name` resource attribute. Each client's API key must have access to the Space it selects.
 
 ## Quick start
 
@@ -122,8 +122,8 @@ The health response shows Collector availability, and debug span counts show loc
 | `ANTHROPIC_MODEL` | Python | `claude-haiku-4-5-20251001` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Python | `http://127.0.0.1:4318/v1/traces` |
 | `ARIZE_PROJECT_NAME` | Python | `strands-agent-sample` |
-| `ARIZE_API_KEY` | Python | Required for export: sent in the `authorization` header |
-| `ARIZE_SPACE_ID` | Python | Destination Space ID, sent in the `arize-space-id` header |
+| `ARIZE_API_KEY` | Python | Required for export: sent in the `arize_api_key` header |
+| `ARIZE_SPACE_ID` | Python | Destination Space ID, sent in the `space_id` header |
 | `ARIZE_COLLECTOR_ENDPOINT` | Collector | `https://otlp.arize.com/v1/traces` — US |
 
 For convenience, the sample uses a single `.env` file. Python configuration validation requires the Anthropic key. A valid Space ID **and** API key are also needed for trace export; without either, the agent runs with export disabled and logs a warning naming the missing setting. Compose passes only `ARIZE_COLLECTOR_ENDPOINT` to the Collector container. Existing shell environment variables take precedence over `.env`.
@@ -152,7 +152,7 @@ client, not restarting or changing the Collector.
 
 The routing path is:
 
-1. Python sets `headers={"arize-space-id": target, "authorization": key}` on its OTLP exporter.
+1. Python sets `headers={"space_id": target, "arize_api_key": key}` on its OTLP exporter.
 2. The OTLP receiver uses `include_metadata: true` to retain both headers.
 3. `attributes/routing` copies them into `arize.space_id` and `arize.auth` on each span,
    replacing any payload-supplied values. The headers are authoritative.
@@ -160,10 +160,12 @@ The routing path is:
    with no credential, from the Arize pipeline.
 5. `attributes/redact` deletes `arize.auth` immediately after the filter, so the credential never
    reaches the batcher, an exporter, or the debug log. `arize.space_id` stays for inspection.
-6. `batch.metadata_keys: [arize-space-id, authorization]` separates batches by destination and
+6. `batch.metadata_keys: [space_id, arize_api_key]` separates batches by destination and
    credential, so one client's spans can never be exported under another's key.
-7. `headers_setter/arize` reads both values `from_context` and attaches them to the outgoing
-   Arize request.
+7. `headers_setter/arize` reads both values `from_context` and renames them for the outgoing
+   Arize request: `space_id` becomes `arize-space-id` and `arize_api_key` becomes
+   `authorization`. The client never needs to know Arize's own header names, and switching the
+   Collector to a gRPC exporter would change only this mapping (`space_id` and `api_key`).
 
 There is **no default Space and no default credential** in the Collector. The syntax check accepts
 base64-shaped IDs; it does not prove that a Space exists or that the key can access it. Arize
@@ -199,7 +201,8 @@ RUN_COLLECTOR_TESTS=1 uv run python -m unittest discover -s tests -v
 This opt-in test starts an isolated Collector and a mock OTLP upstream in Docker, using synthetic
 Space IDs and dummy API keys. It sends concurrent traffic for two Spaces with a different key each,
 forces a retry for each, and verifies that no batch crosses Spaces or credentials. It also checks
-that missing, empty, and malformed routing headers are dropped, that a valid Space ID without a
+that the Collector renames both headers for the upstream request, that missing, empty, and
+malformed routing headers are dropped, that a valid Space ID without a
 credential is dropped, that payload attributes cannot override or substitute for headers, and that
 the credential is not exported as a span attribute. Test containers and their network are removed
 afterward. The first run may pull `python:3.11-alpine` and the pinned Collector image. No real
@@ -269,7 +272,7 @@ Tests use a fake model and a local HTTP receiver. No API keys, running Collector
 - AGENT, LLM, and TOOL spans with inputs and outputs after OpenInference conversion
 - A shared trace ID and valid parent-child relationships
 - The OTLP path and project resource attribute
-- Use of the local endpoint with the selected Space ID and API key request headers
+- Use of the local endpoint with the `space_id` and `arize_api_key` request headers
 - A missing or malformed Space ID or API key disables export without falling back to the environment
 
 Verify export through the Docker Collector to Arize separately using the quick-start steps above.

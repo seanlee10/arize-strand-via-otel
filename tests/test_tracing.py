@@ -116,9 +116,12 @@ class TracingTest(unittest.TestCase):
             for path, headers, request in requests:
                 self.assertEqual(path, "/v1/traces")
                 headers = {key.lower(): value for key, value in headers.items()}
-                # Both halves of the route are client-supplied per request.
-                self.assertEqual(headers["authorization"], "local-test-key")
-                self.assertEqual(headers["arize-space-id"], "U3BhY2U6dGVzdA==")
+                # Both halves of the route are client-supplied per request,
+                # under the gateway's names; the Collector renames them.
+                self.assertEqual(headers["arize_api_key"], "local-test-key")
+                self.assertEqual(headers["space_id"], "U3BhY2U6dGVzdA==")
+                self.assertNotIn("authorization", headers)
+                self.assertNotIn("arize-space-id", headers)
                 for resource in request.resource_spans:
                     attrs = {a.key: a.value.string_value for a in resource.resource.attributes}
                     self.assertEqual(attrs["openinference.project.name"], "local-test-project")

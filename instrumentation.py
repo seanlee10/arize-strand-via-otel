@@ -63,7 +63,9 @@ def setup_tracing(
         provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(
             endpoint=os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
             or "http://127.0.0.1:4318/v1/traces",
-            headers={"arize-space-id": target, "authorization": key},
+            # OCBC gateway naming: the Collector translates these to the
+            # header names Arize expects, so the client never names them.
+            headers={"space_id": target, "arize_api_key": key},
             timeout=10,
         )))
     trace.set_tracer_provider(provider)

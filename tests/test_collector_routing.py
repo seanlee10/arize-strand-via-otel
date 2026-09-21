@@ -69,9 +69,9 @@ class CollectorRoutingTest(unittest.TestCase):
                     attr.key, attr.value.string_value = name, value
                 headers = {'Content-Type': 'application/x-protobuf'}
                 if space is not None:
-                    headers['arize-space-id'] = space
+                    headers['space_id'] = space
                 if key is not None:
-                    headers['authorization'] = key
+                    headers['arize_api_key'] = key
                 with urlopen(Request(endpoint, data=request.SerializeToString(), headers=headers), timeout=10) as response:
                     self.assertEqual(response.status, 200)
 
@@ -114,6 +114,8 @@ class CollectorRoutingTest(unittest.TestCase):
             self.assertEqual(len(successful), 24, docker('logs', collector))
             self.assertEqual(len(set(successful)), 24)
             self.assertEqual({r['space'] for r in received if r['retry']}, set(spaces))
+            # The sink asserts on arize-space-id/authorization above: the Collector
+            # renames space_id/arize_api_key on the way out.
             # Missing/empty/malformed routing or credential headers never hit upstream.
             time.sleep(1.2)
             self.assertEqual(len(records()), len(received))

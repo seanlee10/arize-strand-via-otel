@@ -5,7 +5,7 @@ services:
     volumes:
       - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
     environment:
-      ARIZE_API_KEY: ${ARIZE_API_KEY:?Set ARIZE_API_KEY in .env}
+      # No ARIZE_API_KEY: each client sends its own in the authorization header.
       ARIZE_COLLECTOR_ENDPOINT: ${ARIZE_COLLECTOR_ENDPOINT:-https://otlp.arize.com/v1/traces}
     ports:
       - "127.0.0.1:4317:4317"

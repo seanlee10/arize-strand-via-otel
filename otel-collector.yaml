@@ -15,22 +15,35 @@ processors:
     spike_limit_mib: 48
   attributes/routing:
     actions:
-      # Clear any payload-provided value; the transport header is authoritative.
+      # Clear any payload-provided values; transport headers are authoritative.
       - key: arize.space_id
         action: delete
       - key: arize.space_id
         from_context: metadata.arize-space-id
         action: upsert
-  filter/require_space:
+      - key: arize.auth
+        action: delete
+      - key: arize.auth
+        from_context: metadata.authorization
+        action: upsert
+  filter/require_route:
     error_mode: propagate
     trace_conditions:
       - 'span.attributes["arize.space_id"] == nil'
       - 'not IsMatch(span.attributes["arize.space_id"], "^[A-Za-z0-9+/]+={0,2}$")'
+      - 'span.attributes["arize.auth"] == nil'
+      - 'span.attributes["arize.auth"] == ""'
+  attributes/redact:
+    actions:
+      # The credential exists only so the filter above can see it: drop it
+      # before batching, so it never reaches an exporter or the debug log.
+      - key: arize.auth
+        action: delete
   batch:
     timeout: 1s
     send_batch_size: 512
-    # Never batch different destination spaces into the same export request.
-    metadata_keys: [arize-space-id]
+    # Never batch different destination spaces or credentials into one request.
+    metadata_keys: [arize-space-id, authorization]
     metadata_cardinality_limit: 100
 
 exporters:
@@ -40,7 +53,6 @@ exporters:
     # Verified with Arize HTTP: gzip returned 400; uncompressed protobuf works.
     compression: none
     headers:
-      authorization: ${env:ARIZE_API_KEY}
       arize-interface: otel-collector
     auth:
       authenticator: headers_setter/arize
@@ -64,7 +76,11 @@ extensions:
       - action: upsert
         key: arize-space-id
         from_context: arize-space-id
-        # No default destination: missing headers must not fall back to a space.
+      - action: upsert
+        key: authorization
+        from_context: authorization
+        # No defaults: the Collector holds no credential and no destination of
+        # its own, so a request missing either header is dropped by the filter.
   health_check:
     endpoint: 0.0.0.0:13133
 
@@ -73,5 +89,5 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, attributes/routing, filter/require_space, batch]
+      processors: [memory_limiter, attributes/routing, filter/require_route, attributes/redact, batch]
       exporters: [otlp_http/arize, debug]

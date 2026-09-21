@@ -54,13 +54,18 @@ class DemoModel(Model):
 
 
 class TracingTest(unittest.TestCase):
-    def test_invalid_route_does_not_export_or_inherit_another_space(self):
-        for target in ("", "invalid space", "bad;multiple"):
-            with self.subTest(target=target), patch.dict(os.environ, {
+    def test_invalid_route_does_not_export_or_inherit_env_credentials(self):
+        # An explicit empty value overrides the environment for either half of
+        # the route: a bad client must never borrow another tenant's settings.
+        for overrides in ({"space_id": ""}, {"space_id": "invalid space"},
+                          {"space_id": "bad;multiple"}, {"api_key": ""}, {"api_key": "   "}):
+            with self.subTest(**overrides), patch.dict(os.environ, {
                 "ARIZE_SPACE_ID": "U3BhY2U6b3RoZXI=",
+                "ARIZE_API_KEY": "env-fallback-key",
             }), patch("instrumentation.trace.set_tracer_provider"), patch("instrumentation.StrandsTelemetry"), patch("instrumentation.OTLPSpanExporter") as exporter:
-                with self.assertLogs("instrumentation", level="WARNING"):
-                    provider = setup_tracing(space_id=target)
+                with self.assertLogs("instrumentation", level="WARNING") as logs:
+                    provider = setup_tracing(**overrides)
+                self.assertNotIn("env-fallback-key", "".join(logs.output))
                 try:
                     # No export, including when an explicit empty route overrides env.
                     with provider.get_tracer(__name__).start_as_current_span("still-runs"):
@@ -111,7 +116,8 @@ class TracingTest(unittest.TestCase):
             for path, headers, request in requests:
                 self.assertEqual(path, "/v1/traces")
                 headers = {key.lower(): value for key, value in headers.items()}
-                self.assertNotIn("authorization", headers)
+                # Both halves of the route are client-supplied per request.
+                self.assertEqual(headers["authorization"], "local-test-key")
                 self.assertEqual(headers["arize-space-id"], "U3BhY2U6dGVzdA==")
                 for resource in request.resource_spans:
                     attrs = {a.key: a.value.string_value for a in resource.resource.attributes}

@@ -2,7 +2,7 @@
 
 **A Python sample that sends traces from a local AI agent to Arize AX through a Docker-based OpenTelemetry Collector.**
 
-A Strands `WeatherAgent` powered by Anthropic Claude Haiku calls a weather tool. The client converts agent, model, and tool spans to OpenInference format and sends them to the Collector, which handles batching and authenticated export to Arize.
+A Strands `WeatherAgent` powered by Anthropic Claude Haiku calls a weather tool. The client converts agent, model, and tool spans to OpenInference format and sends them to the Collector, which batches them and exports them to Arize using the credential the client supplied.
 
 > The weather tool returns fixed sample data. It does not call a live weather API. Model responses use the Anthropic API.
 
@@ -31,10 +31,10 @@ flowchart LR
 | Strands Agent | Calls the model, executes tools, and generates native OpenTelemetry spans |
 | OpenInference processor | Converts Strands spans to AGENT, CHAIN, LLM, and TOOL semantic conventions |
 | Python OTLP exporter | Sends converted spans to the local Collector |
-| OTel Collector | Receives spans, limits memory usage, batches, retries, and exports to Arize with authentication |
+| OTel Collector | Receives spans, limits memory usage, batches per destination, retries, and relays to Arize with the client's credential |
 | Arize AX | Displays traces, parent-child relationships, inputs, outputs, and errors |
 
-The client selects its destination using the `arize-space-id` OTLP request header. The Collector preserves that header and adds its own `authorization` credential. The client supplies the project name through the `openinference.project.name` resource attribute. The Collector API key must have access to every destination Space.
+The client selects its destination with the `arize-space-id` OTLP request header and authenticates with the `authorization` header. The Collector forwards both upstream and stores neither, so it holds no credential of its own. The client supplies the project name through the `openinference.project.name` resource attribute. Each client's API key must have access to the Space it selects.
 
 ## Quick start
 
@@ -43,7 +43,7 @@ The client selects its destination using the `arize-space-id` OTLP request heade
 - Python **3.11 or later** and `uv`
 - A running Docker engine and Docker Compose
 - An Anthropic API key
-- An Arize AX API key and Space ID
+- An Arize AX API key and the Space ID it can write to
 
 The examples below use `docker-compose`. If your environment uses the Docker Compose plugin, replace it with `docker compose`.
 
@@ -68,7 +68,7 @@ ARIZE_API_KEY=your-arize-api-key
 ARIZE_SPACE_ID=your-arize-space-id
 ```
 
-`ARIZE_SPACE_ID` must contain the **Space ID**, not the space name. Find it in Arize Space Settings. The `.env` file is excluded from Git.
+`ARIZE_SPACE_ID` must contain the **Space ID**, not the space name. Find it in Arize Space Settings. Both Arize values belong to the Python client, which sends them with every export request. The `.env` file is excluded from Git.
 
 The defaults are `claude-haiku-4-5-20251001` for the model, `strands-agent-sample` for the project, and the **US region** for Arize.
 
@@ -122,44 +122,52 @@ The health response shows Collector availability, and debug span counts show loc
 | `ANTHROPIC_MODEL` | Python | `claude-haiku-4-5-20251001` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Python | `http://127.0.0.1:4318/v1/traces` |
 | `ARIZE_PROJECT_NAME` | Python | `strands-agent-sample` |
-| `ARIZE_API_KEY` | Collector | Required: API key for Arize export |
+| `ARIZE_API_KEY` | Python | Required for export: sent in the `authorization` header |
 | `ARIZE_SPACE_ID` | Python | Destination Space ID, sent in the `arize-space-id` header |
 | `ARIZE_COLLECTOR_ENDPOINT` | Collector | `https://otlp.arize.com/v1/traces` — US |
 
-For convenience, the sample uses a single `.env` file. Python configuration validation requires the Anthropic key. A valid Space ID is also needed for trace export; without it, the agent runs with export disabled and logs a warning. Compose passes only `ARIZE_API_KEY` and `ARIZE_COLLECTOR_ENDPOINT` to the Collector container. Existing shell environment variables take precedence over `.env`.
+For convenience, the sample uses a single `.env` file. Python configuration validation requires the Anthropic key. A valid Space ID **and** API key are also needed for trace export; without either, the agent runs with export disabled and logs a warning naming the missing setting. Compose passes only `ARIZE_COLLECTOR_ENDPOINT` to the Collector container. Existing shell environment variables take precedence over `.env`.
 
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `ARIZE_COLLECTOR_ENDPOINT` configure separate hops. Both use a **full HTTP URL**, including `/v1/traces`.
 
 ## Route different agents to different Spaces
 
-Each client process chooses its Space ID. Both clients below use the same Collector:
+Each client process chooses its Space ID and carries its own API key. Both clients below use
+the same Collector:
 
 ```sh
 # Agent deployment A
-uv run agent.py --space-id "$SPACE_A_ID" --project-name agent-a "What is the weather in Seoul?"
+ARIZE_API_KEY="$KEY_A" uv run agent.py --space-id "$SPACE_A_ID" --project-name agent-a "What is the weather in Seoul?"
 
 # Agent deployment B
-uv run agent.py --space-id "$SPACE_B_ID" --project-name agent-b "What is the weather in London?"
+ARIZE_API_KEY="$KEY_B" uv run agent.py --space-id "$SPACE_B_ID" --project-name agent-b "What is the weather in London?"
 ```
 
-Set `SPACE_A_ID` and `SPACE_B_ID` to your actual Space IDs before running these examples.
-Alternatively, set `ARIZE_SPACE_ID` and `ARIZE_PROJECT_NAME` independently in each deployment.
-CLI options override the corresponding environment variables. Changing a client's destination
-requires restarting that client, not restarting or changing the Collector.
+Set these variables to your actual Space IDs and keys before running the examples. Alternatively,
+set `ARIZE_API_KEY`, `ARIZE_SPACE_ID`, and `ARIZE_PROJECT_NAME` independently in each deployment.
+There is no `--api-key` option on purpose: command-line arguments are readable by any local
+process through `ps`, so the credential stays in the environment. CLI options override the
+corresponding environment variables. Changing a client's destination requires restarting that
+client, not restarting or changing the Collector.
 
 The routing path is:
 
-1. Python sets `headers={"arize-space-id": target}` on its OTLP exporter.
-2. The OTLP receiver uses `include_metadata: true` to retain the header.
-3. `attributes/routing` copies the header into `arize.space_id` on each span for inspection,
-   replacing any payload-supplied value. The header is the authoritative route.
-4. `filter/require_space` drops absent, empty, or malformed routes from the Arize pipeline.
-5. `batch.metadata_keys: [arize-space-id]` separates batches by Space ID.
-6. `headers_setter/arize` reads `from_context: arize-space-id` and attaches that header to
-   the outgoing Arize request. The Arize API key remains in the Collector.
+1. Python sets `headers={"arize-space-id": target, "authorization": key}` on its OTLP exporter.
+2. The OTLP receiver uses `include_metadata: true` to retain both headers.
+3. `attributes/routing` copies them into `arize.space_id` and `arize.auth` on each span,
+   replacing any payload-supplied values. The headers are authoritative.
+4. `filter/require_route` drops spans whose Space ID is absent, empty, or malformed, and spans
+   with no credential, from the Arize pipeline.
+5. `attributes/redact` deletes `arize.auth` immediately after the filter, so the credential never
+   reaches the batcher, an exporter, or the debug log. `arize.space_id` stays for inspection.
+6. `batch.metadata_keys: [arize-space-id, authorization]` separates batches by destination and
+   credential, so one client's spans can never be exported under another's key.
+7. `headers_setter/arize` reads both values `from_context` and attaches them to the outgoing
+   Arize request.
 
-There is **no default Space** in the Collector. The syntax check accepts base64-shaped IDs;
-it does not prove that a Space exists or that the key can access it. Arize validates access.
+There is **no default Space and no default credential** in the Collector. The syntax check accepts
+base64-shaped IDs; it does not prove that a Space exists or that the key can access it. Arize
+validates access.
 A resource/span attribute alone does not route requests in this configuration.
 `headers_setter.from_attribute` refers to receiver authentication data, not arbitrary payload attributes.
 
@@ -175,9 +183,12 @@ add processors that discard request metadata or merge spaces later in the pipeli
 Exporter queue batching is intentionally not enabled; enabling it requires equivalent metadata partitioning.
 The sample limits active batch metadata combinations to 100 for the Collector lifetime.
 
-A client-provided Space ID is a routing hint, not an authorization boundary. In a shared deployment,
-authenticate clients and restrict which Spaces each identity may select. This localhost sample
-assumes trusted clients and one Collector API key authorized for all target Spaces.
+Because the credential now travels with each request, the Collector is a relay rather than an
+authorization boundary: it forwards whatever key it is handed and cannot contain a misbehaving
+client. Arize is the only thing that checks whether a key may write to the selected Space, so a
+client can reach any Space its own key permits. In a shared deployment, authenticate clients at
+the Collector's ingress and issue a separate, narrowly scoped Arize key per client. This localhost
+sample assumes trusted clients.
 
 ### Collector routing integration test
 
@@ -186,11 +197,13 @@ RUN_COLLECTOR_TESTS=1 uv run python -m unittest discover -s tests -v
 ```
 
 This opt-in test starts an isolated Collector and a mock OTLP upstream in Docker, using synthetic
-Space IDs and a dummy API key. It sends concurrent traffic for two Spaces, forces a retry for each,
-and verifies that no batch crosses Spaces. It also checks that missing, empty, and malformed
-headers are dropped, payload routing attributes cannot override headers, and client authorization
-is not forwarded. Test containers and their network are removed afterward. The first run may
-pull `python:3.11-alpine` and the pinned Collector image. No real Arize credentials are used.
+Space IDs and dummy API keys. It sends concurrent traffic for two Spaces with a different key each,
+forces a retry for each, and verifies that no batch crosses Spaces or credentials. It also checks
+that missing, empty, and malformed routing headers are dropped, that a valid Space ID without a
+credential is dropped, that payload attributes cannot override or substitute for headers, and that
+the credential is not exported as a span attribute. Test containers and their network are removed
+afterward. The first run may pull `python:3.11-alpine` and the pinned Collector image. No real
+Arize credentials are used.
 
 ## Project layout
 
@@ -256,8 +269,8 @@ Tests use a fake model and a local HTTP receiver. No API keys, running Collector
 - AGENT, LLM, and TOOL spans with inputs and outputs after OpenInference conversion
 - A shared trace ID and valid parent-child relationships
 - The OTLP path and project resource attribute
-- Use of the local endpoint with the selected Space ID header and without an Arize API key
-- Missing or malformed client routes disable export without falling back to another Space
+- Use of the local endpoint with the selected Space ID and API key request headers
+- A missing or malformed Space ID or API key disables export without falling back to the environment
 
 Verify export through the Docker Collector to Arize separately using the quick-start steps above.
 
@@ -268,10 +281,10 @@ Verify export through the Docker Collector to Arize separately using the quick-s
 | `docker: unknown command: docker compose` | Use the `docker-compose` command. |
 | `connection refused` | Check Docker and Collector status, port 4318, and the client endpoint. |
 | Port already in use | Check for conflicts on ports 4317, 4318, and 13133. If you change the host HTTP port, update the client endpoint too. |
-| Arize export returns 401/403 | Check the client's Space ID and whether the Collector's API key has access to that Space. |
+| Arize export returns 401/403 | Check the client's Space ID and whether that client's API key has access to that Space. |
 | HTTP 400 / `invalid wire-format data` | Check `compression: none` and the full URL ending in `/v1/traces`. |
 | Model API quota or credit error | Check the Anthropic API key, available credits, and usage limits. Execution may fail before the tool runs. |
-| Collector is running but Arize shows no traces | Check Collector export errors, the client Space ID, Arize project, region, and the UI time range. Missing routing headers are dropped. |
+| Collector is running but Arize shows no traces | Check Collector export errors, the client Space ID and API key, Arize project, region, and the UI time range. Spans missing either routing header are dropped. |
 | Changes to `.env` do not take effect | Check for overriding shell environment variables. Recreate the container after changing Collector settings. |
 
 ## References

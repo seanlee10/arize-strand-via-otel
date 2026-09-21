@@ -34,7 +34,6 @@ class CollectorRoutingTest(unittest.TestCase):
             docker('run', '-d', '--name', collector, '--network', network,
                    '-p', '127.0.0.1::4318', '-p', '127.0.0.1::13133',
                    '-v', f'{ROOT / "otel-collector.yaml"}:/config.yaml:ro',
-                   '-e', 'ARIZE_API_KEY=collector-test-key',
                    '-e', 'ARIZE_COLLECTOR_ENDPOINT=http://sink:8080/v1/traces',
                    'otel/opentelemetry-collector-contrib:0.160.0', '--config=/config.yaml')
             ports = json.loads(docker('inspect', '--format', '{{json .NetworkSettings.Ports}}', collector))
@@ -50,7 +49,9 @@ class CollectorRoutingTest(unittest.TestCase):
                         self.fail('Collector did not start: ' + docker('logs', collector))
                     time.sleep(0.2)
 
-            def send(index, space):
+            keys = {'U3BhY2U6QQ==': 'client-key-a', 'U3BhY2U6Qg==': 'client-key-b'}
+
+            def send(index, space, key):
                 request = ExportTraceServiceRequest()
                 resource = request.resource_spans.add()
                 attr = resource.resource.attributes.add()
@@ -61,20 +62,26 @@ class CollectorRoutingTest(unittest.TestCase):
                 span.span_id = os.urandom(8)
                 span.start_time_unix_nano = time.time_ns()
                 span.end_time_unix_nano = span.start_time_unix_nano + 1000
-                # Spoofing a payload attribute must not override a transport header,
-                # nor rescue an absent/invalid header.
-                attr = span.attributes.add()
-                attr.key, attr.value.string_value = 'arize.space_id', 'spoofed'
-                headers = {'Content-Type': 'application/x-protobuf', 'authorization': 'untrusted-client-key'}
+                # Spoofing payload attributes must not override transport headers,
+                # nor rescue an absent/invalid one.
+                for name, value in (('arize.space_id', 'spoofed'), ('arize.auth', 'spoofed-key')):
+                    attr = span.attributes.add()
+                    attr.key, attr.value.string_value = name, value
+                headers = {'Content-Type': 'application/x-protobuf'}
                 if space is not None:
                     headers['arize-space-id'] = space
+                if key is not None:
+                    headers['authorization'] = key
                 with urlopen(Request(endpoint, data=request.SerializeToString(), headers=headers), timeout=10) as response:
                     self.assertEqual(response.status, 200)
 
-            spaces = ['U3BhY2U6QQ==', 'U3BhY2U6Qg==']
+            spaces = list(keys)
             with ThreadPoolExecutor(max_workers=8) as pool:
-                futures = [pool.submit(send, i, space) for i in range(12) for space in spaces]
-                futures += [pool.submit(send, 99, space) for space in (None, '', 'invalid space')]
+                futures = [pool.submit(send, i, space, keys[space]) for i in range(12) for space in spaces]
+                futures += [pool.submit(send, 99, space, 'client-key-a')
+                            for space in (None, '', 'invalid space')]
+                # A valid destination without a credential has no route either.
+                futures += [pool.submit(send, 98, spaces[0], key) for key in (None, '')]
                 for future in futures:
                     future.result()
 
@@ -91,11 +98,14 @@ class CollectorRoutingTest(unittest.TestCase):
                         for scope in resource.scope_spans:
                             for span in scope.spans:
                                 self.assertIn(item['space'], spaces)
-                                self.assertEqual(item['authorization'], 'collector-test-key')
+                                # Each batch carries the credential its own clients sent.
+                                self.assertEqual(item['authorization'], keys[item['space']])
                                 self.assertEqual(item['path'], '/v1/traces')
                                 self.assertTrue(span.name.startswith(item['space'] + ':'), 'Cross-space batch!')
                                 attrs = {a.key: a.value.string_value for a in span.attributes}
                                 self.assertEqual(attrs['arize.space_id'], item['space'])
+                                # The credential is a filter probe, never exported data.
+                                self.assertNotIn('arize.auth', attrs)
                                 if not item['retry']:
                                     successful.append(span.name)
                 if len(set(successful)) == 24:
@@ -104,7 +114,7 @@ class CollectorRoutingTest(unittest.TestCase):
             self.assertEqual(len(successful), 24, docker('logs', collector))
             self.assertEqual(len(set(successful)), 24)
             self.assertEqual({r['space'] for r in received if r['retry']}, set(spaces))
-            # Missing/empty/malformed headers have no route and never hit upstream.
+            # Missing/empty/malformed routing or credential headers never hit upstream.
             time.sleep(1.2)
             self.assertEqual(len(records()), len(received))
         finally:

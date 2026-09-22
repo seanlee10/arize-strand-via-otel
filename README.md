@@ -124,11 +124,71 @@ The health response shows Collector availability, and debug span counts show loc
 | `ARIZE_PROJECT_NAME` | Python | `strands-agent-sample` |
 | `ARIZE_API_KEY` | Python | Required for export: sent in the `arize_api_key` header |
 | `ARIZE_SPACE_ID` | Python | Destination Space ID, sent in the `space_id` header |
-| `ARIZE_COLLECTOR_ENDPOINT` | Collector | `https://otlp.arize.com/v1/traces` — US |
+| `ARIZE_COLLECTOR_ENDPOINT` | Collector | `https://otlp.arize.com/v1/traces` — US, HTTP leg |
+| `ARIZE_COLLECTOR_GRPC_ENDPOINT` | Collector | `otlp.arize.com:443` — US, gRPC leg |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | Python | `http/protobuf` (default) or `grpc` |
 
 For convenience, the sample uses a single `.env` file. Python configuration validation requires the Anthropic key. A valid Space ID **and** API key are also needed for trace export; without either, the agent runs with export disabled and logs a warning naming the missing setting. Compose passes only `ARIZE_COLLECTOR_ENDPOINT` to the Collector container. Existing shell environment variables take precedence over `.env`.
 
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `ARIZE_COLLECTOR_ENDPOINT` configure separate hops. Both use a **full HTTP URL**, including `/v1/traces`.
+
+## Send a trace without calling a model
+
+`mock_trace.py` runs the same agent loop, OpenInference conversion, and export
+headers as `agent.py`, but replaces the model with a deterministic stand-in. The span
+tree is identical — AGENT, CHAIN, LLM, and TOOL — so it exercises the whole Collector
+path without spending model credits. Use it to prove an endpoint accepts traffic.
+
+```sh
+# Through the local Collector
+uv run mock_trace.py
+
+# Straight to Arize, bypassing the Collector, to isolate which hop is broken
+uv run mock_trace.py --endpoint https://otlp.arize.com/v1/traces
+
+# A specific destination
+uv run mock_trace.py --space-id "$SPACE_B_ID" --project-name probe-b
+```
+
+It prints the endpoint it used and the trace ID it produced, so the trace can be
+looked up directly. Exit codes: `0` flushed, `1` flush timed out, `2` no usable route,
+in which case nothing is exported. A completed flush proves the request left the
+client, not that Arize ingested it.
+
+## Run the gRPC leg instead of HTTP
+
+The default path is HTTP on both hops. A gRPC variant overlays only the Arize-facing
+pieces; receivers, processors, and routing rules are inherited from the base config.
+
+```sh
+docker-compose -f compose.yaml -f compose.grpc.yaml up -d --force-recreate
+
+OTEL_EXPORTER_OTLP_PROTOCOL=grpc \
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4317 \
+  uv run mock_trace.py
+```
+
+Both halves must move together. A gRPC endpoint is `host:port` with no signal path;
+an HTTP one is the full `/v1/traces` URL. Pointing one transport at the other's
+endpoint fails silently — the Collector refuses to start if a gRPC endpoint carries
+a path, but a gRPC client against an HTTP listener just gets nothing.
+
+| | HTTP leg | gRPC leg |
+| --- | --- | --- |
+| Client env | `OTEL_EXPORTER_OTLP_PROTOCOL` unset | `=grpc` |
+| Client endpoint | `http://127.0.0.1:4318/v1/traces` | `http://127.0.0.1:4317` |
+| Collector exporter | `otlp_http/arize` | `otlp/arize` |
+| Arize endpoint | `https://otlp.arize.com/v1/traces` | `otlp.arize.com:443` |
+| Forwarded header names | `arize-space-id` / `authorization` | `space_id` / `api_key` |
+
+Measured against `otlp.arize.com` on 2026-09-22: the gRPC endpoint accepts **either**
+header pair. `space_id`/`api_key` and `arize-space-id`/`authorization` both ingested a
+full six-span trace. The names in the table are the per-transport convention, not a
+constraint the endpoint enforces. Do not assume a header-name mismatch explains missing
+traces without testing it.
+
+The client sends `space_id` and `arize_api_key` on both transports; only the Collector's
+`headers_setter` mapping differs. gRPC metadata keys must be lowercase, which both are.
 
 ## Route different agents to different Spaces
 
@@ -213,8 +273,11 @@ Arize credentials are used.
 ```text
 .
 ├── agent.py                # Haiku model, WeatherAgent, and get_weather tool
+├── mock_trace.py           # One trace with a fake model: no model API call
 ├── instrumentation.py      # OpenInference conversion and local OTLP export
 ├── compose.yaml            # Collector container, ports, and environment
+├── compose.grpc.yaml       # Overlay: run the Arize leg over gRPC
+├── otel-collector-grpc.yaml # Overlay: gRPC exporter and header mapping
 ├── otel-collector.yaml      # Receiver → Processors → Exporters pipeline
 ├── .env.example            # Environment variable template
 ├── pyproject.toml          # Python dependencies
@@ -267,7 +330,7 @@ This configuration is intended for local experimentation. The Collector uses an 
 uv run python -m unittest discover -s tests -v
 ```
 
-Tests use a fake model and a local HTTP receiver. No API keys, running Collector, or external API calls are required. They execute a real Strands agent loop and check:
+Tests use `mock_trace.MockModel` and a local HTTP receiver. No API keys, running Collector, or external API calls are required. They execute a real Strands agent loop and check:
 
 - AGENT, LLM, and TOOL spans with inputs and outputs after OpenInference conversion
 - A shared trace ID and valid parent-child relationships

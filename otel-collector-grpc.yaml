@@ -1,0 +1,40 @@
+# Overlay for the gRPC leg: docker compose passes this after otel-collector.yaml.
+# Only the Arize-facing pieces change; the receivers, processors, and routing
+# rules are inherited from the base config.
+exporters:
+  otlp/arize:
+    # gRPC target is host:port with no signal path.
+    endpoint: ${env:ARIZE_COLLECTOR_GRPC_ENDPOINT}
+    auth:
+      authenticator: headers_setter
+    timeout: 15s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 10s
+      max_elapsed_time: 60s
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 1000
+    # NLB idle timeouts silently drop long-lived gRPC connections.
+    keepalive:
+      time: 30s
+      timeout: 10s
+      permit_without_stream: true
+
+extensions:
+  headers_setter:
+    headers:
+      # gRPC metadata pair, as opposed to the HTTP arize-space-id/authorization.
+      - action: upsert
+        key: space_id
+        from_context: space_id
+      - action: upsert
+        key: api_key
+        from_context: arize_api_key
+
+service:
+  pipelines:
+    traces:
+      exporters: [otlp/arize, debug]

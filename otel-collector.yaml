@@ -55,7 +55,7 @@ exporters:
     headers:
       arize-interface: otel-collector
     auth:
-      authenticator: headers_setter/arize
+      authenticator: headers_setter
     timeout: 15s
     retry_on_failure:
       enabled: true
@@ -71,7 +71,7 @@ exporters:
     verbosity: basic
 
 extensions:
-  headers_setter/arize:
+  headers_setter:
     headers:
       # Translate the client's names into the ones Arize HTTP expects.
       - action: upsert
@@ -86,7 +86,7 @@ extensions:
     endpoint: 0.0.0.0:13133
 
 service:
-  extensions: [health_check, headers_setter/arize]
+  extensions: [health_check, headers_setter]
   pipelines:
     traces:
       receivers: [otlp]

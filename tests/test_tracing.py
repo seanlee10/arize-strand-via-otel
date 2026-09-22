@@ -1,6 +1,5 @@
 """Exercise the real agent loop and OTLP serialization without external APIs."""
 
-import json
 import os
 import threading
 import unittest
@@ -10,47 +9,10 @@ from unittest.mock import patch
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
     ExportTraceServiceRequest,
 )
-from strands.models.model import Model
 
 from agent import create_agent
 from instrumentation import setup_tracing
-
-
-class DemoModel(Model):
-    def update_config(self, **model_config):
-        pass
-
-    def get_config(self):
-        return {"model_id": "local-test-model"}
-
-    async def structured_output(self, *args, **kwargs):
-        raise NotImplementedError
-        yield
-
-    async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs):
-        has_result = any(
-            "toolResult" in block
-            for message in messages
-            for block in message["content"]
-        )
-        yield {"messageStart": {"role": "assistant"}}
-        if not has_result:
-            yield {"contentBlockStart": {"start": {"toolUse": {
-                "toolUseId": "weather-1", "name": "get_weather",
-            }}}}
-            yield {"contentBlockDelta": {"delta": {"toolUse": {
-                "input": json.dumps({"city": "Seoul"}),
-            }}}}
-            yield {"contentBlockStop": {}}
-            yield {"messageStop": {"stopReason": "tool_use"}}
-        else:
-            yield {"contentBlockDelta": {"delta": {"text": "샘플 데이터: 서울 22°C."}}}
-            yield {"contentBlockStop": {}}
-            yield {"messageStop": {"stopReason": "end_turn"}}
-        yield {"metadata": {
-            "usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15},
-            "metrics": {"latencyMs": 1},
-        }}
+from mock_trace import MockModel
 
 
 class TracingTest(unittest.TestCase):
@@ -62,7 +24,7 @@ class TracingTest(unittest.TestCase):
             with self.subTest(**overrides), patch.dict(os.environ, {
                 "ARIZE_SPACE_ID": "U3BhY2U6b3RoZXI=",
                 "ARIZE_API_KEY": "env-fallback-key",
-            }), patch("instrumentation.trace.set_tracer_provider"), patch("instrumentation.StrandsTelemetry"), patch("instrumentation.OTLPSpanExporter") as exporter:
+            }), patch("instrumentation.trace.set_tracer_provider"), patch("instrumentation.StrandsTelemetry"), patch("instrumentation.HTTPSpanExporter") as exporter, patch("instrumentation.GRPCSpanExporter") as grpc_exporter:
                 with self.assertLogs("instrumentation", level="WARNING") as logs:
                     provider = setup_tracing(**overrides)
                 self.assertNotIn("env-fallback-key", "".join(logs.output))
@@ -72,6 +34,37 @@ class TracingTest(unittest.TestCase):
                         pass
                     provider.force_flush()
                     exporter.assert_not_called()
+                    grpc_exporter.assert_not_called()
+                finally:
+                    provider.shutdown()
+
+    def test_protocol_env_selects_transport_and_its_endpoint_default(self):
+        # A gRPC endpoint is host:port; an HTTP one carries /v1/traces. Mixing
+        # them fails silently, so the exporter and the default move together.
+        cases = [("grpc", "GRPCSpanExporter", "http://127.0.0.1:4317"),
+                 ("http/protobuf", "HTTPSpanExporter", "http://127.0.0.1:4318/v1/traces")]
+        for protocol, chosen, endpoint in cases:
+            other = "HTTPSpanExporter" if chosen == "GRPCSpanExporter" else "GRPCSpanExporter"
+            with self.subTest(protocol=protocol), patch.dict(os.environ, {
+                "OTEL_EXPORTER_OTLP_PROTOCOL": protocol,
+                "ARIZE_SPACE_ID": "U3BhY2U6dGVzdA==",
+                "ARIZE_API_KEY": "transport-test-key",
+            }, clear=False), patch("instrumentation.trace.set_tracer_provider"), \
+                    patch("instrumentation.StrandsTelemetry"), \
+                    patch(f"instrumentation.{chosen}") as used, \
+                    patch(f"instrumentation.{other}") as unused:
+                os.environ.pop("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", None)
+                provider = setup_tracing()
+                try:
+                    unused.assert_not_called()
+                    used.assert_called_once()
+                    kwargs = used.call_args.kwargs
+                    self.assertEqual(kwargs["endpoint"], endpoint)
+                    # The client always uses the gateway's own header names.
+                    self.assertEqual(kwargs["headers"], {
+                        "space_id": "U3BhY2U6dGVzdA==",
+                        "arize_api_key": "transport-test-key",
+                    })
                 finally:
                     provider.shutdown()
 
@@ -105,7 +98,7 @@ class TracingTest(unittest.TestCase):
             }):
                 provider = setup_tracing()
                 try:
-                    result = create_agent(DemoModel())("서울 날씨를 알려줘.")
+                    result = create_agent(MockModel())("서울 날씨를 알려줘.")
                     self.assertIn("22°C", str(result))
                     self.assertTrue(provider.force_flush(timeout_millis=10000))
                 finally:

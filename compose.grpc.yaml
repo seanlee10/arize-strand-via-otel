@@ -1,0 +1,12 @@
+# gRPC leg: docker-compose -f compose.yaml -f compose.grpc.yaml up -d
+# Overlays the Arize exporter and header names; receivers and routing are inherited.
+services:
+  otel-collector:
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+      - --config=/etc/otelcol-contrib/grpc.yaml
+    volumes:
+      - ./otel-collector-grpc.yaml:/etc/otelcol-contrib/grpc.yaml:ro
+    environment:
+      # gRPC target is host:port; no scheme, no signal path.
+      ARIZE_COLLECTOR_GRPC_ENDPOINT: ${ARIZE_COLLECTOR_GRPC_ENDPOINT:-otlp.arize.com:443}
